@@ -149,7 +149,10 @@ class Journal:
         return [dict(r) for r in self.conn.execute("SELECT * FROM equity ORDER BY time").fetchall()]
 
     def log_day(self, date: str, entries: int, exits: int, forced: int, notes: str) -> None:
-        self.conn.execute("INSERT OR REPLACE INTO daily_log VALUES(?,?,?,?,?)", (date, entries, exits, forced, notes))
+        self.conn.execute(
+            "INSERT INTO daily_log VALUES(?,?,?,?,?) ON CONFLICT(date) DO UPDATE SET "
+            "entries=entries+excluded.entries, exits=exits+excluded.exits, forced=forced+excluded.forced, "
+            "notes=excluded.notes", (date, entries, exits, forced, notes))
 
     def daily_log(self) -> list[dict]:
         return [dict(r) for r in self.conn.execute("SELECT * FROM daily_log ORDER BY date").fetchall()]

@@ -59,7 +59,8 @@ class ClaudeReviewer:
 
     def review(self, trade: dict, diagnoses: list[dict], params: dict) -> dict | None:
         strategy = trade["strategy"]
-        relevant = {k: v for k, v in params.items() if k in (strategy, "regime", "risk")}
+        # the shared regime detector is deliberately not offered: single trades must not retune it
+        relevant = {k: v for k, v in params.items() if k in (strategy, "risk")}
         payload = {
             "trade": {k: trade.get(k) for k in TRADE_FIELDS},
             "rule_based_diagnoses": [{k: d[k] for k in ("code", "title", "detail")} for d in diagnoses],

@@ -1,9 +1,13 @@
 """Post-mortem of losing trades.
 
 Every losing trade is examined against the market data captured at entry and
-exit. Each finding (``Diagnosis``) explains the cause in Thai and proposes a
-bounded parameter change. A second "hindsight" review runs a few bars after
-the exit to check whether the stop was just noise (price later went our way).
+exit. Each finding (``Diagnosis``) explains the cause in Thai and, when the
+cause is something the strategy could have done differently, proposes a
+bounded change to that strategy's parameters (which the adapter still has to
+validate on recent history). Market-wide events (volatility shocks, price
+gaps) are explained but never tuned on: reacting to them from single trades
+pushes shared settings to their limits. A second "hindsight" review runs a
+few bars after the exit to check whether the stop was just noise.
 
 Not every loss is a mistake: if nothing specific is found the trade is
 classified as normal variance and no parameter is touched, which keeps the
@@ -81,16 +85,14 @@ class LossReviewer:
         if atr_in > 0 and (atr_out / atr_in >= 1.4 or shock_bar >= 2.5):
             out.append(Diagnosis(
                 "VOLATILITY_SHOCK", "ความผันผวนพุ่งกะทันหัน",
-                f"ATR เปลี่ยนจาก {atr_in:.4g} เป็น {atr_out:.4g} (x{atr_out / atr_in:.2f}), "
-                f"แท่งวันออกกว้าง {shock_bar:.1f} เท่าของ ATR ตอนเข้า — ให้จับสภาวะผันผวนเร็วขึ้นและลดขนาดไม้",
-                [Adjust("regime", "high_vol_pct", "add", -0.02), Adjust("regime", "high_vol_ratio", "add", -0.05),
-                 Adjust("risk", "high_vol_size_mult", "add", -0.05)]))
+                f"ATR เปลี่ยนจาก {atr_in:.6g} เป็น {atr_out:.6g} (x{atr_out / atr_in:.2f}), "
+                f"แท่งตอนออกกว้าง {shock_bar:.1f} เท่าของ ATR ตอนเข้า — เป็นเหตุจากตลาด ไม่ปรับพารามิเตอร์ "
+                "(ระบบลดขนาดไม้ช่วงผันผวนสูงอยู่แล้ว)"))
 
         if r < -1.3:
             out.append(Diagnosis(
                 "GAP_THROUGH_STOP", "ราคากระโดดข้ามจุดตัดขาดทุน",
-                f"เสีย {r:.2f}R มากกว่าที่วางแผน (1R) เพราะราคาเปิดข้ามสต็อป — เป็นความเสี่ยงที่ควบคุมได้ด้วยขนาดไม้เท่านั้น",
-                [Adjust("risk", "high_vol_size_mult", "add", -0.05)]))
+                f"เสีย {r:.2f}R มากกว่าที่วางแผน (1R) เพราะราคากระโดดข้ามสต็อป — คุมได้ด้วยขนาดไม้เท่านั้น ไม่ปรับพารามิเตอร์"))
 
         if not forced:
             out.extend(self._setup_causes(t, ef, p, strat, d, r, history or []))
@@ -107,12 +109,13 @@ class LossReviewer:
         regime_in, regime_out = t.get("regime"), t.get("regime_exit")
         if regime_out and regime_in and regime_out != regime_in \
                 and DEFAULT_AFFINITY.get(regime_out, {}).get(strat, 0.3) < 0.5:
-            adj = ([Adjust(strat, "exit_on_regime_change", "set", 1)] if not int(p.get("exit_on_regime_change", 0))
-                   else [Adjust("regime", "confirm_bars", "add", -1)])
+            already = int(p.get("exit_on_regime_change", 0))
             out.append(Diagnosis(
                 "REGIME_SHIFT", "สภาวะตลาดเปลี่ยนระหว่างถือ",
                 f"เข้าตอน{REGIME_TH.get(regime_in, regime_in)} แต่ออกตอน{REGIME_TH.get(regime_out, regime_out)} "
-                f"ซึ่งกลยุทธ์ {strat} ไม่ถนัด — ให้ออกเร็วขึ้นเมื่อสภาวะเปลี่ยน", adj))
+                f"ซึ่งกลยุทธ์ {strat} ไม่ถนัด — "
+                + ("ตั้งให้ออกเมื่อสภาวะเปลี่ยนไว้แล้ว" if already else "ให้ออกทันทีเมื่อสภาวะเปลี่ยน"),
+                [] if already else [Adjust(strat, "exit_on_regime_change", "set", 1)]))
 
         htf = int(ef.get("htf_trend") or 0)
         if htf and d != htf and not int(p.get("trend_filter", 0)):
@@ -193,7 +196,7 @@ class LossReviewer:
         strat = trade["strategy"]
         return [Diagnosis(
             "STOP_TOO_TIGHT", "สต็อปแคบเกินไป (โดนสะบัด)",
-            f"หลังโดนสต็อป {len(after)} แท่ง ราคากลับไปถึง {target:.4g} ในทิศที่เราคาดไว้ — ขยายระยะสต็อปของ {strat}",
+            f"หลังโดนสต็อป {len(after)} แท่ง ราคากลับไปถึง {target:.6g} ในทิศที่เราคาดไว้ — ขยายระยะสต็อปของ {strat}",
             [Adjust(strat, "stop_atr", "add", 0.25)])]
 
 

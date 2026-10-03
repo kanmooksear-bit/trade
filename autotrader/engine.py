@@ -1,6 +1,6 @@
-"""The daily trading cycle shared by backtests, paper trading and live trading.
+"""The trading cycle shared by backtests, paper trading and live trading.
 
-One cycle (run once per closed daily bar):
+One cycle runs per closed bar (daily, hourly, ... as configured):
 
 1. detect the market regime of every symbol
 2. walk open positions through the new bar(s): stop / target / trailing / breakeven
@@ -9,7 +9,7 @@ One cycle (run once per closed daily bar):
 4. hindsight reviews of earlier stop-outs
 5. close-based exits (time stop, regime change, signal reversal)
 6. rank every (symbol, strategy) signal by strength x regime weight and enter the best
-7. if nothing was entered, place a small forced "probe" trade (trade-every-day rule)
+7. if nothing was entered yet today, place a small forced "probe" trade (trade-every-day rule)
 """
 from __future__ import annotations
 
@@ -19,9 +19,13 @@ from typing import Callable
 import pandas as pd
 
 from .adapter import Adapter, ParamStore
-from .broker import build_broker
+from .broker import ExternalClose, build_broker
+from .data import timeframe_seconds
+from .exits import bar_exit, tightened_stop, update_extremes
 from .journal import Journal
-from .regime import HIGH_VOL, REGIME_DEFAULTS, REGIME_SPACE, REGIME_TH, RegimeDetector, RegimeReading
+from . import whatif
+from .regime import (HIGH_VOL, REGIME_DEFAULTS, REGIME_SPACE, REGIME_TH, RegimeDetector, RegimeReading, classify,
+                     compute_features)
 from .review import LossReviewer, summarize
 from .risk import RISK_PARAM_DEFAULTS, RISK_PARAM_SPACE, RiskManager
 from .selector import DEFAULT_AFFINITY, StrategySelector
@@ -55,6 +59,7 @@ class Position:
     worst: float = 0.0
     fees: float = 0.0
     stop_moved: bool = False
+    ticket: int | None = None  # broker reference (MT5 position ticket)
 
 
 @dataclass
@@ -116,6 +121,9 @@ class TradingEngine:
         self.hindsight_queue: list[dict] = get("hindsight", [])
         self.closed_queue: list[int] = get("closed_queue", [])
         self.last_equity: float | None = get("last_equity", None)
+        self.last_entry_day: str | None = get("last_entry_day", None)
+        self.tf_seconds = timeframe_seconds(cfg["data"].get("timeframe", "1d"))
+        self.digits = cfg["broker"].get("digits")
         self.reviewer = LossReviewer()
         self.llm = llm_reviewer
         self.readings: dict[str, RegimeReading] = {
@@ -123,6 +131,11 @@ class TradingEngine:
             for s, st in self.detector.state.items() if st.get("reading")}
         self.events: list[str] = []
         self._llm_calls = 0
+        # what-if testing: long history (set by the backtester, else the cycle's data) + per-bar feature cache
+        self.long_history: dict[str, pd.DataFrame] | None = None
+        self._hist: dict[str, pd.DataFrame] = {}
+        self.feat_cache: dict[str, dict[str, tuple[dict, str]]] = {}
+        self._cost_fn = whatif.cost_function(cfg["broker"])
 
     # ------------------------------------------------------------------ state
     def save(self) -> None:
@@ -138,7 +151,13 @@ class TradingEngine:
         j.set_state("hindsight", self.hindsight_queue)
         j.set_state("closed_queue", self.closed_queue)
         j.set_state("last_equity", self.last_equity)
+        j.set_state("last_entry_day", self.last_entry_day)
         j.commit()
+
+    def px(self, price: float | None) -> str:
+        if price is None:
+            return "-"
+        return f"{price:.{int(self.digits)}f}" if self.digits is not None else f"{price:.6g}"
 
     def _event(self, msg: str) -> None:
         self.events.append(msg)
@@ -165,13 +184,15 @@ class TradingEngine:
         if o.symbol in self.positions or o.qty <= 0:
             return
         try:
-            fill = self.broker.execute(o.symbol, o.direction, o.qty, price)
-        except Exception as exc:  # noqa: BLE001 - exchange errors must not kill the cycle
+            fill = self.broker.open(o.symbol, o.direction, o.qty, price, o.stop_dist, o.tp_dist,
+                                    comment=f"at {o.strategy}{' probe' if o.forced else ''}")
+        except Exception as exc:  # noqa: BLE001 - broker errors must not kill the cycle
             self._event(f"⚠️ ส่งคำสั่งเปิด {o.symbol} ไม่สำเร็จ: {exc}")
             return
         entry = fill.price
-        stop = entry - o.direction * o.stop_dist
-        tp = entry + o.direction * o.tp_dist if o.tp_dist else None
+        stop = fill.sl if fill.sl is not None else entry - o.direction * o.stop_dist
+        tp = fill.tp if fill.tp is not None else (entry + o.direction * o.tp_dist if o.tp_dist else None)
+        risk_per_unit = abs(entry - stop) or o.stop_dist
         trade_id = self.journal.open_trade(
             symbol=o.symbol, strategy=o.strategy, regime=o.regime, direction=o.direction, qty=fill.qty,
             entry_time=time, entry_price=entry, stop=stop, take_profit=tp, forced=int(o.forced),
@@ -181,24 +202,29 @@ class TradingEngine:
         self.positions[o.symbol] = Position(
             trade_id=trade_id, symbol=o.symbol, strategy=o.strategy, regime=o.regime, direction=o.direction,
             qty=fill.qty, entry_price=entry, entry_time=time, stop=stop, take_profit=tp,
-            risk_per_unit=o.stop_dist, max_hold=int(p["max_hold"]), trail_atr=float(p["trail_atr"]),
+            risk_per_unit=risk_per_unit, max_hold=int(p["max_hold"]), trail_atr=float(p["trail_atr"]),
             breakeven_at_r=float(p["breakeven_at_r"]), exit_on_regime_change=bool(int(p["exit_on_regime_change"])),
             entry_atr=float(o.features.get("atr", o.stop_dist)), forced=o.forced, last_checked=last_bar,
-            best=entry, worst=entry, fees=fill.fee)
+            best=entry, worst=entry, fees=fill.fee, ticket=fill.ticket)
         tag = " [ไม้บังคับรายวัน]" if o.forced else ""
-        self._event(f"🟢 เปิด {_side(o.direction)} {o.symbol} @ {entry:.4g} x {fill.qty:.6g} ด้วย {o.strategy} "
-                    f"({REGIME_TH.get(o.regime, o.regime)}, score {o.score:.2f}){tag} SL {stop:.4g}"
-                    + (f" TP {tp:.4g}" if tp else ""))
+        size = f"{self.broker.lots(fill.qty):.2f} lot" if self.broker.contract_size != 1 else f"x {fill.qty:.6g}"
+        self._event(f"🟢 เปิด {_side(o.direction)} {o.symbol} @ {self.px(entry)} {size} ด้วย {o.strategy} "
+                    f"({REGIME_TH.get(o.regime, o.regime)}, score {o.score:.2f}){tag} SL {self.px(stop)}"
+                    + (f" TP {self.px(tp)}" if tp else ""))
 
     def _close(self, pos: Position, price: float, time: str, reason: str, exit_features: dict) -> None:
         try:
-            fill = self.broker.execute(pos.symbol, -pos.direction, pos.qty, price)
+            fill = self.broker.close(pos.symbol, pos.direction, pos.qty, price, pos.ticket)
         except Exception as exc:  # noqa: BLE001
             self._event(f"⚠️ ส่งคำสั่งปิด {pos.symbol} ไม่สำเร็จ: {exc} (จะลองใหม่รอบหน้า)")
             return
-        gross = pos.direction * (fill.price - pos.entry_price) * pos.qty
+        self._finalize_close(pos, fill.price, fill.fee, time, reason, exit_features)
+
+    def _finalize_close(self, pos: Position, price: float, fee: float, time: str, reason: str,
+                        exit_features: dict) -> None:
+        gross = pos.direction * (price - pos.entry_price) * pos.qty
         self.broker.realize(gross)
-        fees = pos.fees + fill.fee
+        fees = pos.fees + fee
         pnl = gross - fees
         risk_amount = pos.risk_per_unit * pos.qty
         r = pnl / risk_amount if risk_amount else 0.0
@@ -206,14 +232,23 @@ class TradingEngine:
         mae_r = pos.direction * (pos.worst - pos.entry_price) / pos.risk_per_unit if pos.risk_per_unit else 0.0
         reading = self.readings.get(pos.symbol)
         self.journal.close_trade(
-            pos.trade_id, exit_time=time, exit_price=fill.price, exit_reason=reason,
+            pos.trade_id, exit_time=time, exit_price=price, exit_reason=reason,
             regime_exit=reading.regime if reading else pos.regime, gross_pnl=gross, fees=fees, pnl=pnl,
             r_multiple=r, bars_held=pos.bars_held, mfe_r=mfe_r, mae_r=mae_r, exit_features=exit_features)
         del self.positions[pos.symbol]
         self.closed_queue.append(pos.trade_id)
         icon = "✅" if pnl > 0 else "🔴"
-        self._event(f"{icon} ปิด {_side(pos.direction)} {pos.symbol} @ {fill.price:.4g} ({reason}) "
+        self._event(f"{icon} ปิด {_side(pos.direction)} {pos.symbol} @ {self.px(price)} ({reason}) "
                     f"P&L {pnl:+.2f} ({r:+.2f}R) หลังถือ {pos.bars_held} แท่ง")
+
+    def _reconcile(self, time: str) -> None:
+        """Record positions the broker closed by itself (server-side SL/TP)."""
+        closed: list[ExternalClose] = self.broker.reconcile(list(self.positions.values()))
+        by_id = {p.trade_id: p for p in self.positions.values()}
+        for c in closed:
+            pos = by_id.get(c.trade_id)
+            if pos is not None:
+                self._finalize_close(pos, c.price, c.fee, c.time, c.reason, self._exit_features(pos))
 
     def _exit_features(self, pos: Position, bar: pd.Series | None = None) -> dict:
         reading = self.readings.get(pos.symbol)
@@ -238,49 +273,34 @@ class TradingEngine:
     # --------------------------------------------------------- bar handling
     def _process_bar(self, pos: Position, ts, bar: pd.Series, atr_now: float) -> bool:
         o, h, l = float(bar["open"]), float(bar["high"]), float(bar["low"])
-        d = pos.direction
         pos.bars_held += 1
         pos.last_checked = str(ts)
-        pos.best = max(pos.best, h) if d > 0 else min(pos.best, l)
-        pos.worst = min(pos.worst, l) if d > 0 else max(pos.worst, h)
-        exit_price, reason = None, ""
-        stop_label = "trail" if pos.stop_moved else "stop"
-        if d > 0:
-            if o <= pos.stop:
-                exit_price, reason = o, stop_label
-            elif l <= pos.stop:
-                exit_price, reason = pos.stop, stop_label
-            elif pos.take_profit and o >= pos.take_profit:
-                exit_price, reason = o, "target"
-            elif pos.take_profit and h >= pos.take_profit:
-                exit_price, reason = pos.take_profit, "target"
-        else:
-            if o >= pos.stop:
-                exit_price, reason = o, stop_label
-            elif h >= pos.stop:
-                exit_price, reason = pos.stop, stop_label
-            elif pos.take_profit and o <= pos.take_profit:
-                exit_price, reason = o, "target"
-            elif pos.take_profit and l <= pos.take_profit:
-                exit_price, reason = pos.take_profit, "target"
-        if exit_price is not None:
-            self._close(pos, exit_price, str(ts), reason, self._exit_features(pos, bar))
+        update_extremes(pos, h, l)
+        # with server-side SL/TP (MT5) the broker executes them; _reconcile picks those exits up
+        hit = None if self.broker.server_side_stops else bar_exit(pos, o, h, l)
+        if hit is not None:
+            self._close(pos, hit[0], str(ts), hit[1], self._exit_features(pos, bar))
             return True
-        # end of bar: breakeven and trailing stop only tighten, never loosen
-        best_r = d * (pos.best - pos.entry_price) / pos.risk_per_unit if pos.risk_per_unit else 0.0
-        new_stop = pos.stop
-        if pos.breakeven_at_r > 0 and best_r >= pos.breakeven_at_r:
-            new_stop = max(new_stop, pos.entry_price) if d > 0 else min(new_stop, pos.entry_price)
-        if pos.trail_atr > 0:
-            trail = pos.best - d * pos.trail_atr * atr_now
-            new_stop = max(new_stop, trail) if d > 0 else min(new_stop, trail)
+        new_stop = tightened_stop(pos, atr_now, self.digits)
         if new_stop != pos.stop:
-            pos.stop = new_stop
-            pos.stop_moved = True
+            if self.broker.modify(pos.symbol, pos.ticket, new_stop, pos.take_profit):
+                pos.stop = new_stop
+                pos.stop_moved = True
+            elif pos.direction * (float(bar["close"]) - new_stop) <= 0:
+                # price already closed beyond the new stop (the server refuses such a SL): exit now
+                pos.stop_moved = True
+                self._close(pos, float(bar["close"]), str(ts), "trail", self._exit_features(pos, bar))
+                return True
+            else:
+                self._event(f"⚠️ เลื่อน SL ของ {pos.symbol} ไป {self.px(new_stop)} ไม่สำเร็จ (ใช้ SL เดิม)")
         return False
 
     def check_stops(self, prices: dict[str, float], time: str) -> None:
-        """Intraday check with live prices (daemon mode) between daily cycles."""
+        """Check between bar closes (daemon mode)."""
+        if self.broker.server_side_stops:
+            self._reconcile(time)
+            self._learn_closed(time)
+            return
         for pos in list(self.positions.values()):
             p = prices.get(pos.symbol)
             if p is None:
@@ -293,6 +313,41 @@ class TradingEngine:
         self._learn_closed(time)
 
     # -------------------------------------------------------------- learning
+    def _whatif_histories(self) -> list[whatif.History]:
+        bars = int(self.cfg["learning"].get("whatif_bars", 1000))
+        lookback = int(self.regime_params["vol_lookback"])
+        out = []
+        for sym, df in self._hist.items():
+            start = max(MIN_BARS, len(df) - bars)
+            if len(df) - start < 50:
+                continue
+            cache = self.feat_cache.setdefault(sym, {})
+            feats, regimes = [], []
+            for j in range(start, len(df)):
+                key = str(df.index[j])
+                if key not in cache:  # bars the engine never saw (warm-up, or a fresh process)
+                    f = compute_features(df.iloc[max(0, j - 299): j + 1], lookback)
+                    cache[key] = (f, classify(f, self.regime_params))
+                feats.append(cache[key][0])
+                regimes.append(cache[key][1])
+            keep = {str(t) for t in df.index[start:]}
+            for key in [k for k in cache if k not in keep]:
+                del cache[key]
+            out.append(whatif.History(df, start, feats, regimes))
+        return out
+
+    def _validator(self):
+        return self._whatif if self._hist else None
+
+    def _whatif(self, strategy: str, changes: dict) -> tuple[bool, str]:
+        if strategy not in self.strategies:
+            return True, ""
+        histories = self._whatif_histories()
+        if not histories:
+            return False, "ไม่มีข้อมูลย้อนหลังให้ทดสอบ"
+        return whatif.evaluate(strategy, dict(self.strategies[strategy].params), changes, histories,
+                               self._cost_fn, self.cfg)
+
     def _learn_closed(self, time: str) -> None:
         queue, self.closed_queue = self.closed_queue, []
         for tid in queue:
@@ -314,11 +369,11 @@ class TradingEngine:
                        if not x["forced"] and x["id"] != tid][:30]
             diagnoses = self.reviewer.review(t, history)
             llm_out = self._llm_review(t, diagnoses)
-            notes.extend(self.adapter.submit(t, diagnoses, time))
+            notes.extend(self.adapter.submit(t, diagnoses, time, self._validator()))
             if llm_out and self.cfg["llm_review"].get("apply_suggestions"):
                 for s in llm_out.get("suggestions", []):
                     msg = self.adapter.apply_suggestion(s["target"], s["param"], float(s["value"]),
-                                                        s.get("reason", ""), time)
+                                                        s.get("reason", ""), time, self._validator())
                     if msg:
                         notes.append(f"(AI) {msg}")
             summary = summarize(t, diagnoses, notes)
@@ -359,7 +414,7 @@ class TradingEngine:
             trade = self.journal.trade(h["trade_id"])
             diagnoses = self.reviewer.hindsight(trade, after.iloc[:k]) if trade else []
             if diagnoses:
-                notes = self.adapter.submit(trade, diagnoses, time)
+                notes = self.adapter.submit(trade, diagnoses, time, self._validator())
                 summary = summarize(trade, diagnoses, notes)
                 self.journal.add_review(trade["id"], time, "hindsight", [d.to_dict() for d in diagnoses], summary)
                 self._event("🔁 ทบทวนย้อนหลัง\n" + summary)
@@ -373,8 +428,16 @@ class TradingEngine:
         data = {s: df for s, df in data.items() if df is not None and len(df) >= MIN_BARS}
         closes = {s: float(df["close"].iloc[-1]) for s, df in data.items()}
         self.readings = {s: self.detector.detect(s, df) for s, df in data.items()}
-        day = str(time)[:10]
+        for s, df in data.items():
+            self.feat_cache.setdefault(s, {})[str(df.index[-1])] = (self.readings[s].features,
+                                                                   self.readings[s].regime)
+        self._hist = self.long_history if self.long_history is not None else data
+        # the decision happens when the latest bar closes; "day" and probe timing use that bar clock
+        decision = max(df.index[-1] for df in data.values()) + pd.Timedelta(seconds=self.tf_seconds) \
+            if data else pd.Timestamp(time)
+        day = str(decision)[:10]
         self.risk.start_day(day, self.last_equity if self.last_equity is not None else self.equity(closes))
+        self._reconcile(time)
 
         exits_now = 0
         for sym, pos in list(self.positions.items()):
@@ -389,6 +452,8 @@ class TradingEngine:
                     break
         self._learn_closed(time)
         self._run_hindsight(data, time)
+        for msg in self.adapter.process_pending(self._whatif, time):
+            self._event(f"🧪 {msg}")
 
         equity = self.equity(closes)
         self.risk.update_equity(equity)
@@ -443,8 +508,13 @@ class TradingEngine:
                     taken.add(c.symbol)
                     pending_notional += order.qty * closes[c.symbol]
                     entries += 1
-            if entries == 0 and self.cfg["schedule"].get("trade_every_day", True):
-                entries += self._forced_entry(candidates, equity, closes, taken, exiting, pending_notional, orders)
+            sched = self.cfg["schedule"]
+            probe_due = self.tf_seconds >= 86400 or decision.hour >= int(sched.get("probe_after_hour", 0))
+            if entries == 0 and sched.get("trade_every_day", True) and self.last_entry_day != day and probe_due:
+                entries += self._forced_entry(candidates, equity, closes, taken, exiting, pending_notional, orders,
+                                              day)
+        if entries:
+            self.last_entry_day = day
 
         self.last_equity = equity
         self.journal.record_equity(str(time), equity, self.broker.cash, len(self.positions))
@@ -483,15 +553,36 @@ class TradingEngine:
         if qty <= 0:
             self._event(f"ข้าม {c.symbol} ({c.signal.strategy}): {why}")
             return None
+        tradable = self.broker.normalize_qty(c.symbol, qty)
+        if tradable <= 0:  # below the broker's minimum lot
+            min_q = self.broker.min_qty(c.symbol)
+            min_risk = min_q * stop_dist
+            # a forced probe must never risk more than a normal trade
+            ceiling = float(self.cfg["risk"]["risk_per_trade"]) if forced else \
+                float(self.cfg["risk"].get("max_min_lot_risk", 0.02))
+            if min_q > 0 and min_risk <= ceiling * equity:
+                tradable = min_q
+            else:
+                need = min_risk / float(self.cfg["risk"]["risk_per_trade"])
+                self._event(f"ข้าม {c.symbol} ({c.signal.strategy}): lot ขั้นต่ำเสี่ยง {min_risk:,.2f} "
+                            f"({min_risk / equity:.1%} ของทุน) เกินเพดาน {ceiling:.0%} — ต้องมีทุนราว {need:,.0f} "
+                            "หรือใช้ timeframe ที่เล็กลง (สต็อปแคบลง)")
+                return None
+        qty = tradable
         features = {**f, "regime": c.reading.regime, "weight": c.weight}
         return Order("entry", c.symbol, c.signal.direction, qty=qty, stop_dist=stop_dist, tp_dist=tp_dist,
                      strategy=c.signal.strategy, regime=c.reading.regime, forced=forced,
                      strength=c.signal.strength, score=c.score, reason=c.signal.reason, features=features, params=p)
 
-    def _forced_entry(self, candidates, equity, closes, taken, exiting, pending_notional, orders) -> int:
+    def _note_once(self, day: str, msg: str) -> None:
+        if getattr(self, "_noted_day", None) != (day, msg):
+            self._noted_day = (day, msg)
+            self._event(msg)
+
+    def _forced_entry(self, candidates, equity, closes, taken, exiting, pending_notional, orders, day) -> int:
         probes_open = sum(1 for s, p in self.positions.items() if p.forced and s not in exiting)
         if probes_open >= int(self.cfg["schedule"].get("probe_slots", 2)):
-            self._event("ℹ️ วันนี้ไม่มีไม้ใหม่: ช่องไม้บังคับเต็ม (กฎความเสี่ยงสำคัญกว่ากฎเทรดทุกวัน)")
+            self._note_once(day, "ℹ️ วันนี้ยังไม่มีไม้ใหม่: ช่องไม้บังคับเต็ม (กฎความเสี่ยงสำคัญกว่ากฎเทรดทุกวัน)")
             return 0
         for c in candidates:
             if c.symbol in taken or c.symbol in exiting or c.symbol in self.positions:
@@ -502,10 +593,10 @@ class TradingEngine:
                 return 1
         free = [s for s in self.readings if s not in self.positions and s not in taken and s not in exiting]
         if not free:
-            why = "ทุกเหรียญมีสถานะเปิดอยู่แล้ว (เพิ่ม symbols เพื่อให้เทรดได้ทุกวัน)"
+            why = "ทุก symbol มีสถานะเปิดอยู่แล้ว (ถือไม้เดิมต่อ)"
         elif not self.cfg["broker"].get("allow_short", False):
             why = "สัญญาณที่เหลือเป็นขาลงทั้งหมด แต่ปิดการ short ไว้ (allow_short: false)"
         else:
             why = "กลยุทธ์ที่เหมาะกับสภาวะนี้ติด cooldown ทั้งหมด"
-        self._event(f"ℹ️ วันนี้ไม่มีไม้ใหม่: {why}")
+        self._note_once(day, f"ℹ️ วันนี้ยังไม่มีไม้ใหม่: {why}")
         return 0

@@ -128,15 +128,18 @@ class MeanReversion(Strategy):
 
     def _raw(self, df, feats):
         p = self.params
-        mid, upper, lower, std, _ = ind.bollinger(df["close"].to_numpy(dtype=float), int(p["bb_period"]),
-                                                  float(p["bb_std"]))
+        n = int(p["bb_period"])
+        window = df["close"].to_numpy(dtype=float)[-n:]
+        mid = float(window.mean())
+        sd = float(window.std(ddof=1)) if len(window) > 1 else 0.0
+        upper, lower = mid + float(p["bb_std"]) * sd, mid - float(p["bb_std"]) * sd
         c = feats["close"]
-        sd = float(std[-1]) or feats["atr"]
-        z = (c - float(mid[-1])) / sd
+        sd = sd or feats["atr"]
+        z = (c - mid) / sd
         r = feats["rsi"]
         bias = int(-np.sign(z)) if abs(z) > 0.25 else 0
-        long_ok = c < float(lower[-1]) and r < p["rsi_low"]
-        short_ok = c > float(upper[-1]) and r > p["rsi_high"]
+        long_ok = c < lower and r < p["rsi_low"]
+        short_ok = c > upper and r > p["rsi_high"]
         rsi_ext = (p["rsi_low"] - r) / p["rsi_low"] if bias > 0 else (r - p["rsi_high"]) / (100 - p["rsi_high"])
         strength = 0.5 * _clip01((abs(z) - 1.0) / 1.5) + 0.5 * _clip01(0.5 + rsi_ext)
         setup = bool(long_ok or short_ok)
@@ -168,7 +171,7 @@ class Breakout(Strategy):
         if not (broke_up or broke_down):
             strength *= 0.5
         setup = bool((broke_up or broke_down) and vol_ok)
-        reason = f"ช่อง {int(p['lookback'])} แท่ง [{lo:.4g}, {hi:.4g}], volume x{vr:.2f}"
+        reason = f"ช่อง {int(p['lookback'])} แท่ง [{lo:.6g}, {hi:.6g}], volume x{vr:.2f}"
         return bias, strength, setup, reason
 
 

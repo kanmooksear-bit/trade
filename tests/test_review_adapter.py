@@ -30,15 +30,14 @@ def test_clean_loss_is_normal_variance():
 
 
 @pytest.mark.parametrize("changes, code", [
-    ({"regime_exit": "range"}, "REGIME_SHIFT"),
-    ({"exit_features": {"atr": 3.5, "bar_range_entry_atr": 1.0}}, "VOLATILITY_SHOCK"),
+    ({"regime_exit": "range",
+      "params": {**STRATEGY_CLASSES["trend"].default_params(), "exit_on_regime_change": 0}}, "REGIME_SHIFT"),
     ({"entry_features": {"atr": 2.0, "htf_trend": -1, "extension": 0.5}}, "COUNTER_TREND"),
     ({"entry_features": {"atr": 2.0, "htf_trend": 1, "extension": 2.6}}, "CHASED_ENTRY"),
     ({"strength": 0.5}, "WEAK_SIGNAL"),
     ({"mfe_r": 1.4, "r_multiple": -0.3}, "GAVE_BACK_PROFIT"),
     ({"gross_pnl": 2.0, "pnl": -1.0}, "COSTS"),
     ({"exit_reason": "time", "r_multiple": -0.2}, "STALLED"),
-    ({"r_multiple": -1.8}, "GAP_THROUGH_STOP"),
     ({"strategy": "breakout", "bars_held": 2,
       "params": dict(STRATEGY_CLASSES["breakout"].default_params())}, "FALSE_BREAKOUT"),
 ])
@@ -47,6 +46,16 @@ def test_specific_causes_detected(changes, code):
     assert code in codes(diags)
     assert "NORMAL_VARIANCE" not in codes(diags)
     assert all(d.adjustments for d in diags if d.code == code)
+
+
+@pytest.mark.parametrize("changes, code", [
+    ({"exit_features": {"atr": 3.5, "bar_range_entry_atr": 1.0}}, "VOLATILITY_SHOCK"),
+    ({"r_multiple": -1.8}, "GAP_THROUGH_STOP"),
+    ({"regime_exit": "range"}, "REGIME_SHIFT"),  # already exits on regime change: nothing left to tune
+])
+def test_market_events_are_explained_but_not_tuned(changes, code):
+    [d] = [d for d in LossReviewer().review(base_trade(**changes)) if d.code == code]
+    assert d.adjustments == [] and d.detail
 
 
 def test_forced_trade_does_not_tune_strategy_entry_rules():
@@ -85,7 +94,8 @@ def make_adapter(**learning):
     params = {"stop_atr": 2.0, "flag": 0}
     store = ParamStore()
     store.register("trend", params, {"stop_atr": (1.0, 3.0, 0.25), "flag": (0, 1, 1)})
-    cfg = {"enabled": True, "evidence_required": 2, "probation_trades": 3, "revert_tolerance": 0.05, **learning}
+    cfg = {"enabled": True, "evidence_required": 2, "probation_trades": 3, "revert_tolerance": 0.05,
+           "whatif": False, **learning}
     return Adapter(store, journal, cfg), store, params, journal
 
 
@@ -131,6 +141,29 @@ def test_adjustment_kept_when_results_hold_up():
         adapter.on_trade_closed({"strategy": "trend", "r_multiple": 0.4}, "t")
     assert params["stop_atr"] == 2.5
     assert journal.adjustments()[0]["status"] == "kept"
+
+
+def test_whatif_gate_blocks_or_allows_change():
+    adapter, _, params, journal = make_adapter(evidence_required=1, whatif=True)
+    seen = []
+
+    def reject(strategy, changes):
+        seen.append((strategy, changes))
+        return False, "worse"
+
+    msgs = adapter.submit({"strategy": "trend"}, diag(), "t", validator=reject)
+    assert params["stop_atr"] == 2.0 and seen == [("trend", {"stop_atr": 2.5})] and "worse" in msgs[0]
+    adapter.submit({"strategy": "trend"}, diag(), "t", validator=lambda s, c: (True, "better"))
+    assert params["stop_atr"] == 2.5
+    assert "better" in journal.adjustments()[0]["reason"]
+
+
+def test_change_waits_for_data_then_gets_tested():
+    adapter, _, params, _ = make_adapter(evidence_required=1, whatif=True)
+    msgs = adapter.submit({"strategy": "trend"}, diag(), "t", validator=None)
+    assert params["stop_atr"] == 2.0 and len(adapter.state["pending"]) == 1 and msgs
+    adapter.process_pending(lambda s, c: (True, "ok"), "t2")
+    assert params["stop_atr"] == 2.5 and adapter.state["pending"] == []
 
 
 def test_learning_disabled_changes_nothing():

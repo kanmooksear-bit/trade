@@ -9,7 +9,7 @@ data:
   timeframe: 1d             # ตัดสินใจวันละครั้งจากแท่งรายวันที่ปิดแล้ว
   symbols: [BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT]
   # ตัวอย่างหุ้นไทยผ่าน yfinance:  source: yfinance, symbols: [PTT.BK, AOT.BK, CPALL.BK, KBANK.BK, DELTA.BK]
-  history_bars: 400
+  history_bars: 1200            # ต้องครอบคลุมช่วงทดสอบย้อนหลัง (whatif_bars) ด้วย
 
 broker:
   type: paper               # paper | ccxt (ต้องตั้ง mode: live ด้วย)
@@ -33,13 +33,16 @@ schedule:
   trade_every_day: true     # ถ้าไม่มีสัญญาณดี จะเปิด "ไม้บังคับ" ขนาดเล็กเพื่อให้เทรดทุกวัน
   probe_slots: 2
   probe_max_hold: 2
-  daily_run_utc: "00:05"    # = 07:05 เวลาไทย (หลังแท่งรายวันของคริปโตปิด)
-  stop_check_minutes: 60
+  stop_check_minutes: 60    # daemon: เช็คสต็อปทุก 60 นาที (บอทรันรอบใหม่เองทันทีที่แท่งรายวันปิด)
+  poll_seconds: 60
 
 learning:
   enabled: true
-  evidence_required: 2      # สาเหตุเดิมต้องเกิดซ้ำกี่ครั้งถึงจะปรับพารามิเตอร์ (กัน overfit)
-  probation_trades: 6       # ทดลองค่าใหม่กี่ไม้ ถ้าผลแย่ลงจะย้อนกลับเอง
+  evidence_required: 2          # สาเหตุเดิมต้องเกิดซ้ำกี่ครั้ง ถึงจะพิจารณาปรับ (กัน overfit)
+  whatif: true                  # ก่อนปรับ: ทดสอบค่าใหม่กับข้อมูลย้อนหลัง ต้องดีกว่าชัดเจน และดีขึ้นทั้งสองครึ่ง
+  whatif_bars: 1000             # จำนวนแท่งย้อนหลังที่ใช้ทดสอบ
+  whatif_min_gain_r: 1.0        # ต้องดีขึ้นอย่างน้อยกี่ R
+  probation_trades: 10          # หลังปรับ ดูผลจริงอีกกี่ไม้ ถ้าแย่ลงชัดเจนจะย้อนกลับเอง
   hindsight_bars: 5
 
 llm_review:

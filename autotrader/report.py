@@ -5,6 +5,7 @@ import json
 from collections import Counter, defaultdict
 
 import numpy as np
+import pandas as pd
 
 from .journal import Journal
 from .regime import REGIME_TH
@@ -14,13 +15,19 @@ def performance(journal: Journal, starting_cash: float) -> dict:
     curve = journal.equity_curve()
     trades = list(reversed(journal.closed_trades()))
     eq = np.array([c["equity"] for c in curve]) if curve else np.array([starting_cash])
-    rets = np.diff(eq) / eq[:-1] if len(eq) > 1 else np.array([0.0])
     peak = np.maximum.accumulate(eq)
     max_dd = float(((peak - eq) / peak).max()) if len(eq) else 0.0
-    days = max(len(eq), 1)
     total = float(eq[-1] / starting_cash - 1.0)
-    cagr = float((eq[-1] / starting_cash) ** (365.0 / days) - 1.0) if eq[-1] > 0 else -1.0
-    sharpe = float(rets.mean() / rets.std() * np.sqrt(365)) if rets.std() > 0 else 0.0
+    cagr, sharpe = 0.0, 0.0
+    if len(curve) > 1:
+        # works for any bar size: measure time from timestamps and use end-of-day equity for Sharpe
+        series = pd.Series(eq, index=pd.to_datetime([c["time"] for c in curve], utc=True, format="ISO8601"))
+        years = max((series.index[-1] - series.index[0]).total_seconds() / (365.25 * 86400), 1 / 365.25)
+        cagr = float((eq[-1] / starting_cash) ** (1 / years) - 1.0) if eq[-1] > 0 else -1.0
+        daily = series.groupby(series.index.date).last()
+        rets = daily.pct_change().dropna()
+        if len(rets) > 1 and rets.std() > 0:
+            sharpe = float(rets.mean() / rets.std() * np.sqrt(len(daily) / years))
     pnl = np.array([t["pnl"] for t in trades]) if trades else np.array([])
     wins = pnl[pnl > 0].sum() if len(pnl) else 0.0
     losses = -pnl[pnl < 0].sum() if len(pnl) else 0.0
