@@ -1,0 +1,8 @@
+numpy>=1.26
+pandas>=2.1
+pyyaml>=6.0
+# optional: market data / live trading
+ccxt>=4.3
+yfinance>=0.2.40
+# optional: AI post-mortem of losing trades (Claude)
+anthropic>=1.0

@@ -1,0 +1,57 @@
+# คัดลอกเป็น config.yaml แล้วแก้ตามต้องการ:  cp config.example.yaml config.yaml
+# ค่าที่ไม่ได้ใส่จะใช้ค่า default ใน autotrader/config.py
+
+mode: paper                 # paper = จำลอง (ไม่ใช้เงินจริง) | live = ส่งคำสั่งจริง
+
+data:
+  source: ccxt              # synthetic (ข้อมูลจำลอง) | ccxt (คริปโต) | yfinance (หุ้น/ฟอเร็กซ์) | csv
+  exchange: binance         # ชื่อ exchange ใน ccxt
+  timeframe: 1d             # ตัดสินใจวันละครั้งจากแท่งรายวันที่ปิดแล้ว
+  symbols: [BTC/USDT, ETH/USDT, SOL/USDT, BNB/USDT, XRP/USDT]
+  # ตัวอย่างหุ้นไทยผ่าน yfinance:  source: yfinance, symbols: [PTT.BK, AOT.BK, CPALL.BK, KBANK.BK, DELTA.BK]
+  history_bars: 400
+
+broker:
+  type: paper               # paper | ccxt (ต้องตั้ง mode: live ด้วย)
+  sandbox: true             # ใช้ testnet ของ exchange ก่อนเสมอ
+  starting_cash: 10000      # เงินทุนที่ "แบ่งให้บอท" ใช้ — บอทคำนวณขนาดไม้จากยอดนี้เท่านั้น
+  fee_rate: 0.001
+  slippage_bps: 5
+  allow_short: false        # spot ห้าม short; ถ้าใช้ futures/paper ค่อยเปิด
+  api_key_env: EXCHANGE_API_KEY       # ชื่อ environment variable (อย่าใส่ key ลงไฟล์นี้)
+  api_secret_env: EXCHANGE_API_SECRET
+
+risk:
+  risk_per_trade: 0.01      # เสียได้สูงสุด 1% ของทุนต่อไม้ (ถ้าโดนสต็อป)
+  max_position_pct: 0.30
+  max_open_positions: 3
+  daily_loss_limit: 0.03    # ขาดทุนเกิน 3% ในวันเดียว -> หยุดเปิดไม้ใหม่วันนั้น
+  max_drawdown: 0.25        # ทุนลดจากจุดสูงสุด 25% -> หยุดทั้งระบบจนกว่าจะสั่ง reset-halt
+  min_score: 0.35
+
+schedule:
+  trade_every_day: true     # ถ้าไม่มีสัญญาณดี จะเปิด "ไม้บังคับ" ขนาดเล็กเพื่อให้เทรดทุกวัน
+  probe_slots: 2
+  probe_max_hold: 2
+  daily_run_utc: "00:05"    # = 07:05 เวลาไทย (หลังแท่งรายวันของคริปโตปิด)
+  stop_check_minutes: 60
+
+learning:
+  enabled: true
+  evidence_required: 2      # สาเหตุเดิมต้องเกิดซ้ำกี่ครั้งถึงจะปรับพารามิเตอร์ (กัน overfit)
+  probation_trades: 6       # ทดลองค่าใหม่กี่ไม้ ถ้าผลแย่ลงจะย้อนกลับเอง
+  hindsight_bars: 5
+
+llm_review:
+  enabled: false            # true = ให้ Claude ช่วยวิเคราะห์ไม้ที่ขาดทุน (ต้องมี ANTHROPIC_API_KEY)
+  model: claude-opus-5-5
+  effort: medium
+  apply_suggestions: false  # true = ยอมให้ AI ปรับพารามิเตอร์ (ยังถูกจำกัดช่วงและไม่เกิน 2 step ต่อครั้ง)
+  max_reviews_per_day: 5
+
+notify:                     # แจ้งเตือนผ่าน Telegram ถ้าตั้ง env สองตัวนี้ไว้
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_chat_id_env: TELEGRAM_CHAT_ID
+
+storage:
+  db_path: data/autotrader.db

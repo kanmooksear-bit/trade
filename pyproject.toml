@@ -1,0 +1,21 @@
+[project]
+name = "autotrader"
+version = "0.1.0"
+description = "Adaptive auto-trading bot: regime detection, strategy switching, daily trading, loss post-mortems and self-adjustment"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.26", "pandas>=2.1", "pyyaml>=6.0"]
+
+[project.optional-dependencies]
+crypto = ["ccxt>=4.3"]
+stocks = ["yfinance>=0.2.40"]
+ai = ["anthropic>=1.0"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+autotrader = "autotrader.cli:main"
+
+[tool.setuptools]
+packages = ["autotrader"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
