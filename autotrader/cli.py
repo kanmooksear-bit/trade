@@ -44,7 +44,21 @@ def _load_backtest_data(cfg: dict, days: int) -> dict[str, pd.DataFrame]:
     return {s: source.fetch(s, bars=bars) for s in symbols}
 
 
+def _safe_output() -> None:
+    """Thai text and emoji must never crash the bot: console output keeps working, and
+    output redirected to a log file is written as UTF-8 (Windows defaults to cp874)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream.isatty():
+                stream.reconfigure(errors="replace")
+            else:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _safe_output()
     parser = argparse.ArgumentParser(prog="autotrader", description="Adaptive auto-trader")
     parser.add_argument("--config", "-c", default=None, help="YAML config (default: built-in defaults)")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -91,7 +105,10 @@ def main(argv: list[str] | None = None) -> int:
         check_stops(cfg, print)
         return 0
     if args.cmd == "daemon":
-        daemon(cfg, print)
+        try:
+            daemon(cfg, print)
+        except KeyboardInterrupt:
+            print("หยุดบอทแล้ว (SL/TP ของไม้ที่ค้างอยู่ใน MT5 ยังทำงานบนเซิร์ฟเวอร์)")
         return 0
     journal = Journal(cfg["storage"]["db_path"])
     try:
