@@ -252,11 +252,13 @@ class MT5Broker(PaperBroker):
         return Fill(fill_price, filled, fee, ticket=int(result.order), sl=sl, tp=tp or None)
 
     def close(self, symbol, direction, qty, ref_price, ticket) -> Fill:
+        if not ticket:  # without the position ticket an opposite deal would OPEN a new hedge position
+            raise RuntimeError(f"สถานะ {symbol} ไม่มี ticket ของ MT5 — ไม่ส่งคำสั่งปิด (ตรวจใน MT5 ด้วยตัวเอง)")
         info = self._info(symbol)
-        positions = self.mt5.positions_get(ticket=ticket) if ticket else None
-        if ticket and not positions:
+        positions = self.mt5.positions_get(ticket=ticket)
+        if not positions:
             raise RuntimeError(f"ไม่พบสถานะ #{ticket} ใน MT5 (อาจถูกปิดไปแล้ว)")
-        volume = float(positions[0].volume) if positions else self._lots(symbol, qty)
+        volume = float(positions[0].volume)
         tick = self.mt5.symbol_info_tick(symbol)
         price = float(tick.bid if direction > 0 else tick.ask)
         request = {
@@ -265,8 +267,7 @@ class MT5Broker(PaperBroker):
             "price": price, "deviation": self.deviation, "magic": self.magic, "comment": "autotrader close",
             "type_time": self.mt5.ORDER_TIME_GTC, "type_filling": self._filling(info),
         }
-        if ticket:
-            request["position"] = int(ticket)
+        request["position"] = int(ticket)
         result = self._send(request)
         deals = self.mt5.history_deals_get(ticket=result.deal) if result.deal else None
         fee = -(float(deals[0].commission) + float(getattr(deals[0], "fee", 0.0)) + float(deals[0].swap)) \

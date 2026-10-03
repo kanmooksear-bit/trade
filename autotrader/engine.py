@@ -117,6 +117,11 @@ class TradingEngine:
         self.risk = RiskManager(cfg["risk"], self.risk_params, get("risk", {}))
         self.adapter = Adapter(self.store, journal, cfg["learning"], get("adapter", {}))
         self.broker = broker if broker is not None else build_broker(cfg, get("broker", {}))
+        saved_kind = get("broker_kind", None)
+        if saved_kind and saved_kind != type(self.broker).__name__:
+            raise RuntimeError(
+                f"ฐานข้อมูลนี้เป็นของโหมด {saved_kind} แต่ตอนนี้ใช้ {type(self.broker).__name__} — "
+                "ห้ามใช้ไฟล์ร่วมกัน (เงินทุน/ไม้ค้างจะปนกัน) ให้ตั้ง storage.db_path เป็นไฟล์ใหม่")
         self.positions: dict[str, Position] = {p["symbol"]: Position(**p) for p in get("positions", [])}
         self.hindsight_queue: list[dict] = get("hindsight", [])
         self.closed_queue: list[int] = get("closed_queue", [])
@@ -152,6 +157,7 @@ class TradingEngine:
         j.set_state("closed_queue", self.closed_queue)
         j.set_state("last_equity", self.last_equity)
         j.set_state("last_entry_day", self.last_entry_day)
+        j.set_state("broker_kind", type(self.broker).__name__)
         j.commit()
 
     def px(self, price: float | None) -> str:

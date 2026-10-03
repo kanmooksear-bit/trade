@@ -5,7 +5,7 @@
 #   1) backtest ด้วยข้อมูลจำลอง:      data.source: synthetic   แล้ว  python -m autotrader -c config.yaml backtest --days 365
 #   2) backtest ด้วยข้อมูลจริงจาก MT5:  data.source: mt5  (หรือ csv จากการ export ใน MT5)
 #   3) paper trading กับราคาจริง:       data.source: mt5, broker.type: paper   แล้วรัน daemon
-#   4) เงินจริง (หลังมั่นใจแล้ว):       mode: live, broker.type: mt5
+#   4) เงินจริง (หลังมั่นใจแล้ว):       mode: live, broker.type: mt5, storage.db_path: data/xauusd_live.db
 
 mode: paper                     # live = ส่งคำสั่งจริงเข้า MT5
 
@@ -81,4 +81,5 @@ llm_review:
   apply_suggestions: false
 
 storage:
-  db_path: data/xauusd.db
+  db_path: data/xauusd.db         # ตอนเปลี่ยนเป็นเงินจริง ให้ใช้ไฟล์ใหม่ เช่น data/xauusd_live.db
+                                # (บอทไม่ยอมใช้ไฟล์เดียวกันข้ามโหมด paper/live)

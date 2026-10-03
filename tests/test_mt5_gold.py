@@ -187,6 +187,23 @@ def test_rejected_trailing_stop_beyond_price_closes_at_market(mt5, gold_cfg):
     assert trade["exit_reason"] == "trail" and mt5.requests[-1]["position"] == pos.ticket
 
 
+def test_mt5_never_closes_without_ticket(mt5, gold_cfg):
+    broker = MT5Broker(gold_cfg["broker"], {"cash": 1000.0}, gold_cfg)
+    with pytest.raises(RuntimeError):
+        broker.close("XAUUSD", 1, 1.0, 0.0, None)
+    assert mt5.requests == []
+
+
+def test_paper_database_cannot_be_reused_for_live(mt5, gold_cfg, tmp_path):
+    db = str(tmp_path / "bot.db")
+    journal = Journal(db)
+    TradingEngine(gold_cfg, journal).save()  # paper
+    journal.close()
+    live = {**gold_cfg, "mode": "live", "broker": {**gold_cfg["broker"], "type": "mt5"}}
+    with pytest.raises(RuntimeError, match="db_path"):
+        TradingEngine(live, Journal(db))
+
+
 def test_real_money_brokers_need_explicit_live_mode(mt5, gold_cfg):
     with pytest.raises(RuntimeError):
         build_broker({**gold_cfg, "broker": {**gold_cfg["broker"], "type": "mt5"}}, {})
