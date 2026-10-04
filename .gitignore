@@ -10,3 +10,4 @@ reports/
 config.yaml
 .env
 python_path.txt
+backtest_*.txt
