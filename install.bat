@@ -34,8 +34,8 @@ rem remember which Python to use for start_bot.bat
 > python_path.txt echo %PY%
 
 if not exist config.yaml (
-    copy config.xauusd.example.yaml config.yaml >nul
-    echo Created config.yaml for XAUUSD / HFM.
+    copy config.xauusd.m15.example.yaml config.yaml >nul
+    echo Created config.yaml for XAUUSD M15 / HFM.
 )
 
 echo.

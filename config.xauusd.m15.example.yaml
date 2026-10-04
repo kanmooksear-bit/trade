@@ -1,0 +1,89 @@
+# XAUUSD (ทองคำ) โบรก HFM ผ่าน MT5 — แท่ง M15 สำหรับทุนเล็ก (100 USD), ราคา 2 ตำแหน่ง
+# คัดลอกไปใช้:  copy /Y config.xauusd.m15.example.yaml config.yaml   (Windows)
+#
+# ⚠️ ทุน 100 USD: ไม้เล็กสุด 0.01 lot บน M15 มักเสี่ยงราว 5-10% ของทุนต่อไม้ (สูงกว่ามาตรฐาน 1% มาก)
+#    แพ้ติดกัน 3-4 ไม้ = ขาดทุน 20-30% — ทดลองในบัญชี Demo ก่อนเสมอ
+#
+# ขั้นตอนแนะนำ:
+#   1) backtest ด้วยข้อมูลจำลอง:      data.source: synthetic   แล้ว  python -m autotrader -c config.yaml backtest --days 365
+#   2) backtest ด้วยข้อมูลจริงจาก MT5:  data.source: mt5  (หรือ csv จากการ export ใน MT5)
+#   3) paper trading กับราคาจริง:       data.source: mt5, broker.type: paper   แล้วรัน daemon
+#   4) เงินจริง (หลังมั่นใจแล้ว):       mode: live, broker.type: mt5, storage.db_path: data/xauusd_live.db
+
+mode: paper                     # live = ส่งคำสั่งจริงเข้า MT5
+
+data:
+  source: mt5                   # mt5 | csv | synthetic | yfinance (GC=F = ทองฟิวเจอร์ส ใช้แทนได้คร่าวๆ)
+  timeframe: 15m                # M15 สต็อปแคบลง เหมาะกับทุนเล็ก (แต่สเปรดกินสัดส่วนมากขึ้น)
+  symbols: [XAUUSD]             # ชื่อต้องตรงกับใน Market Watch ของ MT5 (บางบัญชีมีตัวต่อท้าย)
+  history_bars: 1200            # ต้องครอบคลุมช่วงทดสอบย้อนหลัง (whatif_bars) ด้วย
+  csv_files:                    # ถ้าใช้ source: csv — ไฟล์ที่ export จาก MT5 (View > Symbols > Bars > Export)
+    XAUUSD: data/csv/XAUUSD_M15.csv
+  synthetic:                    # ข้อมูลจำลองแบบทอง (ทดสอบระบบโดยไม่ต้องต่อ MT5)
+    start: "2021-01-01"
+    start_price: 1800
+    vol_scale: 0.6
+    weekdays_only: true
+    digits: 2
+
+broker:
+  type: paper                   # paper | mt5
+  starting_cash: 100            # ทุน (USD) ที่ "แบ่งให้บอท" — บอทคำนวณขนาดไม้จากยอดนี้
+  contract_size: 100            # 1 lot = 100 ออนซ์ (ค่ามาตรฐาน XAUUSD; โหมด mt5 อ่านจากโบรกเอง)
+  volume_min: 0.01
+  volume_step: 0.01
+  digits: 2                     # ทศนิยม 2 ตำแหน่ง
+  spread: 0.35                  # สเปรด (USD) ใช้ในโหมด paper/backtest — ใส่ค่าจริงจาก MT5 (35 จุด = 0.35)
+  commission_per_lot: 0.0       # บัญชี Premium = 0; บัญชีที่คิดค่าคอม ใส่ค่าต่อข้าง (ต่อ lot)
+  fee_rate: 0.0
+  slippage_bps: 0.3
+  min_notional: 0
+  allow_short: true             # CFD ทอง เปิด Sell ได้
+  magic: 26100301               # เลขประจำคำสั่งของบอทใน MT5
+  deviation_points: 30          # ยอมให้ราคาคลาดได้ 30 จุด (0.30 USD)
+
+mt5:
+  path: ""                      # ถ้าหา MT5 ไม่เจอ ใส่ path ของ terminal64.exe ของ HFM
+  server: ""                    # ชื่อเซิร์ฟเวอร์ตามหน้าล็อกอิน MT5 (หรือ env MT5_SERVER)
+  login_env: MT5_LOGIN          # เลขบัญชี — ตั้งเป็น environment variable
+  password_env: MT5_PASSWORD    # รหัสผ่าน — ตั้งเป็น environment variable (ห้ามใส่ในไฟล์)
+  server_env: MT5_SERVER
+
+risk:
+  risk_per_trade: 0.01          # เสียได้ 1% ของทุนต่อไม้ (ถ้าโดน SL)
+  max_min_lot_risk: 0.10        # ทุนเล็ก: ยอมใช้ 0.01 lot ได้ถ้าเสี่ยงไม่เกิน 10% ต่อไม้ (เกินนี้บอทข้ามไม้นั้น)
+  max_position_pct: 20          # มูลค่าสัญญา ÷ ทุน (= leverage สูงสุดต่อไม้)
+  max_gross_exposure: 20
+  max_open_positions: 1         # ทองตัวเดียว ถือทีละไม้
+  daily_loss_limit: 0.15        # ขาดทุนเกิน 15% ในวันเดียว -> หยุดเปิดไม้ใหม่วันนั้น
+  max_drawdown: 0.40            # ทุนลดจากจุดสูงสุด 40% -> หยุดทั้งระบบ (ทุน 100 เหลือ ~60)
+  min_score: 0.35
+
+schedule:
+  trade_every_day: true         # ทุกวันทำการ (จ.-ศ.) ต้องมีอย่างน้อย 1 ไม้
+  probe_after_hour: 16          # ถ้าถึง 16:00 (เวลาเซิร์ฟเวอร์ MT5 ≈ ช่วงตลาด New York เปิด) ยังไม่มีไม้ จะเปิดไม้บังคับ
+  probe_slots: 1
+  probe_max_hold: 12            # ไม้บังคับถือไม่เกิน 12 แท่ง (3 ชั่วโมง)
+                                # หมายเหตุ: ไม้บังคับเสี่ยงได้ไม่เกิน 1% — ทุน 100 จึงมักไม่มีไม้บังคับ
+  stop_check_minutes: 5         # MT5 วาง SL/TP บนเซิร์ฟเวอร์อยู่แล้ว นี่คือรอบตรวจว่าไม้ไหนถูกปิดไป
+  poll_seconds: 15
+
+learning:
+  enabled: true
+  evidence_required: 2          # สาเหตุเดิมต้องเกิดซ้ำกี่ครั้ง ถึงจะพิจารณาปรับ (กัน overfit)
+  whatif: true                  # ก่อนปรับ: ทดสอบค่าใหม่กับข้อมูลย้อนหลัง ต้องดีกว่าชัดเจน และดีขึ้นทั้งสองครึ่ง
+  whatif_bars: 1000             # จำนวนแท่งย้อนหลังที่ใช้ทดสอบ
+  whatif_min_gain_r: 1.0        # ต้องดีขึ้นอย่างน้อยกี่ R
+  probation_trades: 10          # หลังปรับ ดูผลจริงอีกกี่ไม้ ถ้าแย่ลงชัดเจนจะย้อนกลับเอง
+  hindsight_bars: 16
+  cooldown_bars: 96             # พักกลยุทธ์ที่แพ้ติดกัน 96 แท่ง (1 วัน)
+
+llm_review:
+  enabled: false                # true = ให้ Claude ช่วยวิเคราะห์ไม้ที่ขาดทุน (ต้องมี ANTHROPIC_API_KEY)
+  model: claude-opus-5-5
+  effort: medium
+  apply_suggestions: false
+
+storage:
+  db_path: data/xauusd_m15.db     # ตอนเปลี่ยนเป็นเงินจริง ให้ใช้ไฟล์ใหม่ เช่น data/xauusd_m15_live.db
+                                # (บอทไม่ยอมใช้ไฟล์เดียวกันข้ามโหมด paper/live)
