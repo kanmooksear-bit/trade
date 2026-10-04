@@ -16,7 +16,7 @@ type backtest_result.txt
 echo.
 echo === 2/3 Without learning (for comparison) ===
 "%PY%" -m autotrader -c config.yaml backtest --days %DAYS% --no-learning > backtest_nolearning.txt 2>&1
-type backtest_nolearning.txt | more +0 | findstr /n "^" | findstr "^[1-7]:"
+type backtest_nolearning.txt | findstr /n "^" | findstr "^[1-7]:"
 
 echo.
 echo === 3/3 Without the trade-every-day rule (for comparison) ===
