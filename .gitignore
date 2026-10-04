@@ -9,3 +9,4 @@ data/csv/
 reports/
 config.yaml
 .env
+python_path.txt
