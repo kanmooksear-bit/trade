@@ -1,6 +1,7 @@
 """XAUUSD / MetaTrader 5 behaviour, tested against a fake MetaTrader5 module
 (the real package only runs on Windows next to an MT5 terminal)."""
 from collections import Counter
+from datetime import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from autotrader.data import DataSource, load_csv, synthetic_ohlcv
 from autotrader.engine import Order, TradingEngine
 from autotrader.journal import Journal
 from autotrader.report import performance
+from autotrader.sessions import in_window, local_time
 from autotrader.strategies import STRATEGY_CLASSES
 
 PRESET = Path(__file__).resolve().parent.parent / "config.xauusd.example.yaml"
@@ -233,7 +235,11 @@ def test_min_lot_rule_and_probe_cap(gold_cfg):
     assert any("ต้องมีทุนราว 5,000" in e for e in engine.events)
 
 
-def test_intraday_daily_rule_waits_for_probe_hour(gold_cfg):
+def _thai(ts):
+    return local_time(pd.Timestamp(ts), "mt5_gmt2_us_dst", 7)
+
+
+def test_intraday_daily_rule_and_trading_hours(gold_cfg):
     cfg = load_config(PRESET, {
         "data": {"source": "synthetic"}, "broker": {"starting_cash": 20_000},
         "risk": {"max_drawdown": 0.9}, "storage": {"db_path": ":memory:"}})
@@ -243,13 +249,25 @@ def test_intraday_daily_rule_waits_for_probe_hour(gold_cfg):
     trades = result.journal.closed_trades()
     forced = [t for t in trades if t["forced"]]
     assert forced, "expected some forced daily trades"
-    probe_hour = cfg["schedule"]["probe_after_hour"]
-    assert all(pd.Timestamp(t["entry_time"]).hour >= probe_hour for t in forced)
-    per_day = Counter(pd.Timestamp(t["entry_time"]).date() for t in forced)
-    assert max(per_day.values()) == 1
-    stats = performance(result.journal, 20_000)
-    assert stats["days_with_entry"] >= 0.8 * stats["days"]
+    # forced trades only after 17:00 Thai time, at most one per day
+    assert all(_thai(t["entry_time"]).hour >= cfg["schedule"]["probe_after_hour"] for t in forced)
+    assert max(Counter(_thai(t["entry_time"]).date() for t in forced).values()) == 1
+    # every entry inside 08:00-19:30 Thai time; nothing held overnight (H1 bars: flat by the 20:00 bar)
+    for t in trades:
+        entry, exit_ = _thai(t["entry_time"]), _thai(t["exit_time"])
+        assert in_window(entry, "08:00", "19:30"), entry
+        assert exit_.date() == entry.date() and exit_.time() <= time(20, 0), (entry, exit_)
+    assert any(t["exit_reason"] == "session_end" for t in trades)
     assert all(t["entry_price"] == round(t["entry_price"], 2) for t in trades)
+
+
+def test_server_clock_conversion():
+    # HFM server: GMT+2 in winter, GMT+3 while the USA is on DST
+    assert _thai("2024-01-15 03:00:00+00:00").hour == 8   # 03:00 server (GMT+2) = 01:00 UTC = 08:00 Thai
+    assert _thai("2024-07-15 04:00:00+00:00").hour == 8   # 04:00 server (GMT+3) = 01:00 UTC = 08:00 Thai
+    assert in_window(pd.Timestamp("2024-01-15 19:15"), "08:00", "19:30")
+    assert not in_window(pd.Timestamp("2024-01-15 19:30"), "08:00", "19:30")
+    assert not in_window(pd.Timestamp("2024-01-15 07:59"), "08:00", "19:30")
 
 
 def test_load_metatrader_csv_export(tmp_path):

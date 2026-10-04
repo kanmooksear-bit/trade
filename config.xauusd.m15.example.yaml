@@ -16,6 +16,7 @@ data:
   source: mt5                   # mt5 | csv | synthetic | yfinance (GC=F = ทองฟิวเจอร์ส ใช้แทนได้คร่าวๆ)
   timeframe: 15m                # M15 สต็อปแคบลง เหมาะกับทุนเล็ก (แต่สเปรดกินสัดส่วนมากขึ้น)
   symbols: [XAUUSD]             # ชื่อต้องตรงกับใน Market Watch ของ MT5 (บางบัญชีมีตัวต่อท้าย)
+  server_tz: mt5_gmt2_us_dst      # เวลาเซิร์ฟเวอร์ HFM = GMT+2 (GMT+3 ช่วงอเมริกาใช้เวลาออมแสง)
   history_bars: 1200            # ต้องครอบคลุมช่วงทดสอบย้อนหลัง (whatif_bars) ด้วย
   csv_files:                    # ถ้าใช้ source: csv — ไฟล์ที่ export จาก MT5 (View > Symbols > Bars > Export)
     XAUUSD: data/csv/XAUUSD_M15.csv
@@ -61,7 +62,12 @@ risk:
 
 schedule:
   trade_every_day: true         # ทุกวันทำการ (จ.-ศ.) ต้องมีอย่างน้อย 1 ไม้
-  probe_after_hour: 16          # ถ้าถึง 16:00 (เวลาเซิร์ฟเวอร์ MT5 ≈ ช่วงตลาด New York เปิด) ยังไม่มีไม้ จะเปิดไม้บังคับ
+  trading_hours:                # เปิดไม้ใหม่เฉพาะช่วงเวลานี้ (เวลาไทย)
+    start: "08:00"
+    end: "19:30"
+    utc_offset: 7               # เวลาไทย = UTC+7
+    close_at_end: true          # ถึง 19:30 ปิดไม้ที่ค้างทั้งหมด (ไม่ถือข้ามคืน)
+  probe_after_hour: 17          # ถ้าถึง 17:00 (เวลาไทย) วันนั้นยังไม่มีไม้ จะเปิดไม้บังคับ
   probe_slots: 1
   probe_max_hold: 12            # ไม้บังคับถือไม่เกิน 12 แท่ง (3 ชั่วโมง)
                                 # หมายเหตุ: ไม้บังคับเสี่ยงได้ไม่เกิน 1% — ทุน 100 จึงมักไม่มีไม้บังคับ

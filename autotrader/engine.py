@@ -22,6 +22,7 @@ from .adapter import Adapter, ParamStore
 from .broker import ExternalClose, build_broker
 from .data import timeframe_seconds
 from .exits import bar_exit, tightened_stop, update_extremes
+from .sessions import in_window, local_time
 from .journal import Journal
 from . import whatif
 from .regime import (HIGH_VOL, REGIME_DEFAULTS, REGIME_SPACE, REGIME_TH, RegimeDetector, RegimeReading, classify,
@@ -468,12 +469,18 @@ class TradingEngine:
         candidates = self._candidates(data)
         min_score = float(self.cfg["risk"]["min_score"])
         exiting: set[str] = set()
+        hours = self.cfg["schedule"].get("trading_hours") or {}
+        local = local_time(decision, self.cfg["data"].get("server_tz", "utc"), hours.get("utc_offset", 7)) \
+            if hours else decision
+        session_open = in_window(local, hours["start"], hours["end"]) if hours else True
         for sym, pos in self.positions.items():
             reading = self.readings.get(sym)
             if reading is None:
                 continue
             reason = ""
-            if pos.bars_held >= pos.max_hold:
+            if not session_open and hours.get("close_at_end", True):
+                reason = "session_end"
+            elif pos.bars_held >= pos.max_hold:
                 reason = "time"
             elif pos.exit_on_regime_change and reading.regime != pos.regime \
                     and DEFAULT_AFFINITY.get(reading.regime, {}).get(pos.strategy, 0.3) < 0.5:
@@ -490,7 +497,9 @@ class TradingEngine:
 
         can_open, why = self.risk.can_open(equity)
         entries = 0
-        if not can_open:
+        if not session_open:
+            pass  # outside trading hours: manage exits only
+        elif not can_open:
             self._event(f"⛔ ไม่เปิดไม้ใหม่: {why}")
         else:
             max_open = int(self.cfg["risk"]["max_open_positions"])
@@ -515,7 +524,7 @@ class TradingEngine:
                     pending_notional += order.qty * closes[c.symbol]
                     entries += 1
             sched = self.cfg["schedule"]
-            probe_due = self.tf_seconds >= 86400 or decision.hour >= int(sched.get("probe_after_hour", 0))
+            probe_due = self.tf_seconds >= 86400 or local.hour >= int(sched.get("probe_after_hour", 0))
             if entries == 0 and sched.get("trade_every_day", True) and self.last_entry_day != day and probe_due:
                 entries += self._forced_entry(candidates, equity, closes, taken, exiting, pending_notional, orders,
                                               day)

@@ -17,6 +17,7 @@ DEFAULTS: dict[str, Any] = {
         "history_bars": 1200,  # must cover learning.whatif_bars
         "csv_dir": "data/csv",
         "csv_files": {},  # optional {symbol: path}, e.g. an MT5 history export
+        "server_tz": "utc",  # clock of the bar timestamps: utc | mt5_gmt2_us_dst (HFM & most MT5) | hours
         "synthetic_seed": 7,
         "synthetic": {"start": "2019-01-01", "start_price": 100.0, "vol_scale": 1.0, "weekdays_only": False,
                       "digits": None},
@@ -58,7 +59,9 @@ DEFAULTS: dict[str, Any] = {
         "trade_every_day": True,
         "probe_slots": 2,  # extra slots reserved for forced daily trades (on top of max_open_positions)
         "probe_max_hold": 2,  # forced trades are closed after this many bars
-        "probe_after_hour": 0,  # intraday: only force a trade after this hour (bar clock) if none yet today
+        "probe_after_hour": 0,  # intraday: force a trade only after this hour (local clock if trading_hours set)
+        # optional: {"start": "08:00", "end": "19:30", "utc_offset": 7, "close_at_end": True}
+        "trading_hours": None,
         "stop_check_minutes": 60,
         "poll_seconds": 60,  # daemon: how often to look for a newly closed bar
     },
